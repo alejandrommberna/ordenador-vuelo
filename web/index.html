@@ -1,0 +1,1230 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ordenador de vuelo</title>
+<!--
+  Página del ordenador de vuelo. La sirve el propio ESP32, que crea una red
+  WiFi SIN internet: por eso no se usa ninguna librería externa (ni Three.js
+  ni nada de un CDN). El 3D está hecho a mano con un <canvas> 2D.
+
+  Si abres este archivo directamente en el navegador (doble clic), arranca en
+  MODO DEMO con datos simulados, para poder tocar la web sin la placa.
+-->
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f9; --surface: #ffffff; --ink: #191919; --ink2: #666666;
+    --grid: #e7e7e7; --axis: #c2c2c2; --border: rgba(11,11,11,0.10);
+    /* Ejes X / Y / Z: mismos colores en el 3D y en la gráfica */
+    --x: #f47230; --y: #00b894; --z: #257de0;
+    --ref: #6a4ce2;                       /* aleta de referencia del cohete */
+    --alt: #ee7fac;                       /* altitud barométrica */
+    --cuerpo: #cdcdcd; --ojiva: #747474; --aleta: #9e9e9e;
+    --sombra: rgba(0,0,0,0.09);
+    --good: #0aac23; --warn: #fbb315; --crit: #dc3c3d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page: #0b0b0b; --surface: #191919; --ink: #efefef; --ink2: #9c9c9c;
+      --grid: #303030; --axis: #474747; --border: rgba(255,255,255,0.10);
+      --x: #e76624; --y: #00a888; --z: #338ced;
+      --ref: #9887ef;
+      --alt: #e24d8b;
+      --cuerpo: #dcdcdc; --ojiva: #9a9a9a; --aleta: #b6b6b6;
+      --sombra: rgba(0,0,0,0.45);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+           padding: 14px 20px; flex-wrap: wrap; }
+  h1 { font-size: 17px; margin: 0; font-weight: 650; }
+  .sub { color: var(--ink2); font-size: 13px; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px;
+         padding: 0 20px 20px; align-items: start; }
+  .tarjeta { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+             padding: 14px 16px; }
+  h2 { font-size: 12px; margin: 0 0 10px; color: var(--ink2); font-weight: 600;
+       letter-spacing: .04em; text-transform: uppercase; }
+  .panel { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+  /* ---- columna izquierda: escena 3D + barómetro y GPS */
+  .columna { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .fila-sensores { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+  .cifras { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 10px 0; }
+  .cifra .valor { font-size: 24px; font-weight: 650; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .cifra .et { color: var(--ink2); font-size: 12px; }
+  #graficaAlt { width: 100%; height: 130px; display: block; }
+  #traza { width: 100%; height: 230px; display: block; margin: 10px 0; }
+  a.boton { font: inherit; border-radius: 8px; border: 1px solid var(--border); color: var(--ink);
+            padding: 7px 12px; text-decoration: none; display: inline-block; }
+  a.boton:hover { background: var(--page); }
+  .hud-mini { display: flex; gap: 16px; margin-top: 8px; font-size: 13px; color: var(--ink2); }
+  .hud-mini b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+  @media (max-width: 1180px) { .fila-sensores { grid-template-columns: minmax(0, 1fr); } }
+
+  /* ---- escena 3D */
+  .escena { position: relative; height: clamp(440px, 64vh, 720px); padding: 0; overflow: hidden; }
+  #vista3d { width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+  #vista3d:active { cursor: grabbing; }
+  .hud { position: absolute; pointer-events: none; }
+  .hud.sup-izq { top: 14px; left: 16px; }
+  .hud.sup-der { top: 14px; right: 16px; text-align: right; color: var(--ink2); font-size: 12px; }
+  .hud.inf-izq { bottom: 10px; left: 10px; text-align: center; color: var(--ink2); font-size: 11px; }
+  .hud.inf-der { bottom: 12px; right: 16px; color: var(--ink2); font-size: 12px; text-align: right; }
+  .heroe { font-size: 40px; font-weight: 650; line-height: 1.05; }
+  .heroe-et { color: var(--ink2); font-size: 13px; }
+  .muestra { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; }
+  .aviso-demo { position: absolute; left: 50%; top: 14px; transform: translateX(-50%);
+                background: var(--page); border: 1px solid var(--border); border-radius: 999px;
+                padding: 4px 12px; font-size: 12px; color: var(--ink2); white-space: nowrap; }
+
+  /* ---- conexión */
+  .pastilla { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--border);
+              background: var(--surface); border-radius: 999px; padding: 4px 12px; font-size: 13px; }
+  .punto { width: 8px; height: 8px; border-radius: 50%; background: var(--axis); }
+  .pastilla[data-e="ok"] .punto { background: var(--good); }
+  .pastilla[data-e="espera"] .punto { background: var(--warn); }
+  .pastilla[data-e="demo"] .punto { background: var(--ref); }
+
+  /* ---- lecturas */
+  .filas { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: baseline; }
+  .filas .et { color: var(--ink2); }
+  .num { font-variant-numeric: tabular-nums; text-align: right; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .sep { height: 1px; background: var(--grid); margin: 10px 0; }
+  .nota { color: var(--ink2); font-size: 12px; margin: 8px 0 0; }
+
+  /* ---- gráfica */
+  .leyenda { display: flex; gap: 14px; margin-bottom: 6px; flex-wrap: wrap; }
+  .leyenda span.v { font-variant-numeric: tabular-nums; }
+  .caja-grafica { position: relative; }
+  #grafica { width: 100%; height: 150px; display: block; }
+  .tip { position: absolute; pointer-events: none; background: var(--surface); color: var(--ink);
+         border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; font-size: 12px;
+         box-shadow: 0 4px 14px rgba(0,0,0,.12); display: none; white-space: nowrap; }
+  .tip div { font-variant-numeric: tabular-nums; }
+  label.check { display: flex; gap: 6px; align-items: center; color: var(--ink2); font-size: 12px;
+                margin-top: 8px; cursor: pointer; }
+
+  /* ---- calibración */
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 8px;
+          border-radius: 999px; font-weight: 600; font-size: 13px; border: 1px solid var(--border); }
+  .chip svg { width: 15px; height: 15px; }
+  .chip[data-e="ok"] svg { color: var(--good); }
+  .chip[data-e="midiendo"] svg { color: var(--warn); }
+  .chip[data-e="fallo"] svg { color: var(--crit); }
+  .chip[data-e="sin"] svg { color: var(--ink2); }
+  .cabecera-cal { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  th { color: var(--ink2); font-weight: 500; font-size: 12px; text-align: right; padding: 2px 0; }
+  th:first-child, td:first-child { text-align: left; }
+  td { padding: 3px 0; font-variant-numeric: tabular-nums; text-align: right; }
+  .barra { height: 6px; background: var(--grid); border-radius: 3px; overflow: hidden; margin-top: 10px; }
+  .barra > div { height: 100%; width: 0; background: var(--ink); border-radius: 3px; transition: width .1s linear; }
+  .botones { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  button, select { font: inherit; border-radius: 8px; border: 1px solid var(--border);
+                   background: var(--surface); color: var(--ink); padding: 7px 12px; cursor: pointer; }
+  button:hover, select:hover { background: var(--page); }
+  button.primario { background: var(--ink); color: var(--surface); border-color: var(--ink); font-weight: 600; }
+  button.primario:hover { opacity: .88; }
+  button:disabled { opacity: .45; cursor: default; }
+  .alerta { color: var(--ink); font-size: 12px; margin: 8px 0 0; display: none; }
+  .alerta::before { content: "⚠ "; color: var(--warn); }
+
+  /* ---- filtro */
+  .deslizador { display: flex; gap: 10px; align-items: center; }
+  .deslizador input { flex: 1; accent-color: var(--ink); }
+  select { width: 100%; margin-top: 4px; }
+
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; padding: 0 10px 12px; }
+    header { padding: 12px 12px; }
+    .escena { height: 60vh; min-height: 360px; }
+    .heroe { font-size: 32px; }
+    .hud-mini { gap: 12px; font-size: 12px; }
+    .cifra .valor { font-size: 19px; }
+    /* en el móvil no cabe todo arriba: la leyenda baja bajo la cifra y el
+       aviso de demo pasa abajo a la derecha, en lugar de la ayuda del ratón */
+    .hud.sup-der { top: 112px; left: 16px; right: auto; text-align: left; }
+    .hud.inf-der { display: none; }
+    .aviso-demo { top: auto; bottom: 12px; left: auto; right: 12px; transform: none;
+                  white-space: normal; max-width: 55%; text-align: right; border-radius: 10px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Ordenador de vuelo</h1>
+    <div class="sub">IMU · barómetro · GPS · Heltec WiFi LoRa 32 V3</div>
+  </div>
+  <div class="pastilla" id="conexion" data-e="espera"><span class="punto"></span><span id="conexionTexto">Conectando…</span></div>
+</header>
+
+<main>
+  <div class="columna">
+  <!-- ============================== ESCENA 3D -->
+  <section class="tarjeta escena" id="escena">
+    <canvas id="vista3d" aria-label="Orientación del cohete en 3D"></canvas>
+    <div class="aviso-demo" id="avisoDemo" hidden>Datos simulados · conéctate a la WiFi de la placa para ver la IMU real</div>
+    <div class="hud sup-izq">
+      <div class="heroe" id="inclinacion">—</div>
+      <div class="heroe-et">inclinación respecto a la vertical</div>
+      <div class="hud-mini">
+        <span>altitud <b id="hudAlt">—</b></span>
+        <span>vel. vertical <b id="hudVz">—</b></span>
+        <span>GPS <b id="hudGps">—</b></span>
+      </div>
+    </div>
+    <div class="hud sup-der">
+      <div><span class="muestra" style="background:var(--ref)"></span> aleta de referencia (+X del cohete)</div>
+      <div><span style="letter-spacing:-1px;color:var(--axis)">┆</span> vertical</div>
+      <div id="avisoGravedad"></div>
+    </div>
+    <div class="hud inf-izq">
+      <canvas id="gizmo" width="96" height="96" style="width:96px;height:96px;display:block"></canvas>
+      ejes del sensor
+    </div>
+    <div class="hud inf-der">arrastra: girar cámara · rueda/pellizco: zoom<br>doble clic: vista inicial</div>
+  </section>
+
+  <div class="fila-sensores">
+    <!-- ============================== BARÓMETRO -->
+    <section class="tarjeta">
+      <div class="cabecera-cal">
+        <h2 style="margin:0">Barómetro</h2>
+        <span class="chip" id="chipBaro" data-e="sin"><svg viewBox="0 0 16 16" id="iconoBaro"></svg><span id="textoBaro">—</span></span>
+      </div>
+      <div class="cifras">
+        <div class="cifra"><div class="valor" id="alt">—</div><div class="et">altitud sobre el cero</div></div>
+        <div class="cifra"><div class="valor" id="vz">—</div><div class="et">velocidad vertical</div></div>
+        <div class="cifra"><div class="valor" id="altMax">—</div><div class="et">máxima (apogeo)</div></div>
+      </div>
+      <div class="caja-grafica">
+        <canvas id="graficaAlt" aria-label="Altitud del último minuto"></canvas>
+        <div class="tip" id="tipAlt"></div>
+      </div>
+      <div class="sep"></div>
+      <div class="filas">
+        <span class="et">Presión</span><span></span><span class="num" id="presion">—</span>
+        <span class="et">Temperatura</span><span></span><span class="num" id="tempBaro">—</span>
+        <span class="et">Humedad</span><span></span><span class="num" id="humedad">—</span>
+        <span class="et">Altitud estándar (ISA)</span><span></span><span class="num" id="altIsa">—</span>
+      </div>
+      <div class="botones"><button id="btnCero">Poner altitud a cero aquí</button></div>
+      <p class="nota">Cerca del suelo, subir 1 m baja la presión unos 0,12 hPa. Levanta la placa y mira la gráfica. La altitud relativa deriva despacio con el tiempo (cambia el tiempo atmosférico): pon a cero antes de cada lanzamiento.</p>
+    </section>
+
+    <!-- ============================== GPS -->
+    <section class="tarjeta">
+      <div class="cabecera-cal">
+        <h2 style="margin:0">GPS</h2>
+        <span class="chip" id="chipGps" data-e="sin"><svg viewBox="0 0 16 16" id="iconoGps"></svg><span id="textoGps">—</span></span>
+      </div>
+      <canvas id="traza" aria-label="Recorrido del GPS en metros desde el punto de inicio"></canvas>
+      <div class="filas">
+        <span class="et">Satélites · HDOP</span><span></span><span class="num" id="satelites">—</span>
+        <span class="et">Latitud</span><span></span><span class="num" id="latitud">—</span>
+        <span class="et">Longitud</span><span></span><span class="num" id="longitud">—</span>
+        <span class="et">Altitud GPS</span><span></span><span class="num" id="altGps">—</span>
+        <span class="et">Velocidad · rumbo</span><span></span><span class="num" id="velocidad">—</span>
+        <span class="et">Hora UTC</span><span></span><span class="num" id="horaGps">—</span>
+        <span class="et">Frases NMEA (ok / malas)</span><span></span><span class="num" id="frases">—</span>
+      </div>
+      <div class="botones">
+        <button id="btnTraza">Borrar recorrido</button>
+        <a class="boton" id="enlaceMapa" target="_blank" rel="noopener" hidden>Ver en el mapa ↗</a>
+      </div>
+      <p class="nota">Necesita cielo abierto: el primer fix tarda de 1 a 5 min. La red de la placa no tiene internet, así que el recorrido se dibuja en metros sin mapa de fondo; el enlace al mapa usa los datos del móvil.</p>
+    </section>
+  </div>
+  </div>
+
+  <!-- ============================== PANEL -->
+  <aside class="panel">
+
+    <section class="tarjeta">
+      <h2>Orientación (sensor)</h2>
+      <div class="filas">
+        <span class="et">Alabeo · roll (X)</span><span></span><span class="num" id="roll">—</span>
+        <span class="et">Cabeceo · pitch (Y)</span><span></span><span class="num" id="pitch">—</span>
+        <span class="et">Guiñada · yaw (Z)</span><span></span><span class="num" id="yaw">—</span>
+      </div>
+      <div class="sep"></div>
+      <div class="filas">
+        <span class="et">Cuaternión</span><span></span><span class="num mono" id="cuaternion">—</span>
+        <span class="et">|a|</span><span></span><span class="num" id="moduloA">—</span>
+        <span class="et">Temperatura chip</span><span></span><span class="num" id="temp">—</span>
+        <span class="et">Frecuencia</span><span></span><span class="num" id="frecuencias">—</span>
+      </div>
+      <p class="nota">El yaw no tiene referencia absoluta (no hay brújula): es relativo al arranque y deriva poco a poco.</p>
+    </section>
+
+    <section class="tarjeta">
+      <h2>Giróscopo (°/s)</h2>
+      <div class="leyenda" id="leyenda">
+        <span><span class="muestra" style="background:var(--x)"></span> X <span class="v" id="gx">—</span></span>
+        <span><span class="muestra" style="background:var(--y)"></span> Y <span class="v" id="gy">—</span></span>
+        <span><span class="muestra" style="background:var(--z)"></span> Z <span class="v" id="gz">—</span></span>
+      </div>
+      <div class="caja-grafica" id="cajaGrafica">
+        <canvas id="grafica" aria-label="Velocidad angular de los últimos 10 segundos"></canvas>
+        <div class="tip" id="tip"></div>
+      </div>
+      <label class="check"><input type="checkbox" id="verCrudo"> Ver la lectura cruda (sin restar el sesgo)</label>
+      <p class="nota">Con la placa quieta y calibrada, las tres líneas tiemblan alrededor de 0. En crudo se quedan separadas del 0: esa separación es el sesgo.</p>
+    </section>
+
+    <section class="tarjeta" aria-live="polite">
+      <div class="cabecera-cal">
+        <h2 style="margin:0">Calibración del giróscopo</h2>
+        <span class="chip" id="chipCal" data-e="sin"><svg viewBox="0 0 16 16" id="iconoCal"></svg><span id="textoCal">Sin calibrar</span></span>
+      </div>
+      <p class="nota" id="mensajeCal" style="margin-top:8px">—</p>
+      <table>
+        <thead><tr><th>Eje</th><th>Sesgo restado</th><th>Ruido σ</th></tr></thead>
+        <tbody>
+          <tr><td><span class="muestra" style="background:var(--x)"></span> X</td><td id="bx">—</td><td id="sx">—</td></tr>
+          <tr><td><span class="muestra" style="background:var(--y)"></span> Y</td><td id="by">—</td><td id="sy">—</td></tr>
+          <tr><td><span class="muestra" style="background:var(--z)"></span> Z</td><td id="bz">—</td><td id="sz">—</td></tr>
+        </tbody>
+      </table>
+      <p class="nota" id="tempCal">—</p>
+      <p class="alerta" id="alertaTemp">La temperatura ha cambiado más de 5 °C desde la calibración: el sesgo también. Recalibra.</p>
+      <div class="barra" id="barra" hidden><div id="barraRelleno"></div></div>
+      <div class="botones">
+        <button class="primario" id="btnCalibrar">Calibrar giróscopo</button>
+        <button id="btnBorrar">Borrar</button>
+      </div>
+      <p class="nota">Deja la placa quieta en la mesa unos 3,5 s. También vale la tecla <b>c</b> en el monitor serie o mantener el botón PRG 1 s y soltar.</p>
+    </section>
+
+    <section class="tarjeta">
+      <h2>Filtro y vista</h2>
+      <div class="deslizador">
+        <span class="et">β</span>
+        <input type="range" id="beta" min="0" max="0.5" step="0.005" value="0.1" aria-label="Ganancia beta del filtro">
+        <span class="num" id="betaValor" style="min-width:44px">0,100</span>
+      </div>
+      <p class="nota">β bajo: movimiento suave pero la inclinación deriva más. β alto: corrige rápido hacia la gravedad pero tiembla con las vibraciones. β = 0: solo giróscopo.</p>
+      <div class="botones">
+        <button id="btnRealinear">Realinear con la gravedad</button>
+        <button id="btnYawCero">Yaw a cero</button>
+        <button id="btnVista">Vista inicial</button>
+      </div>
+      <div class="sep"></div>
+      <label class="et" for="montaje">La punta del cohete apunta hacia el eje del sensor…</label>
+      <select id="montaje">
+        <option value="+Z">+Z (placa tumbada, cohete de pie)</option>
+        <option value="-Z">−Z</option>
+        <option value="+X">+X</option>
+        <option value="-X">−X</option>
+        <option value="+Y">+Y</option>
+        <option value="-Y">−Y</option>
+      </select>
+      <p class="nota">Solo cambia el dibujo y la inclinación: elige cómo irá montada la placa dentro del cohete.</p>
+    </section>
+  </aside>
+</main>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+
+/* =====================================================================
+   1. MATEMÁTICAS: cuaterniones [w, x, y, z]
+   ---------------------------------------------------------------------
+   El ESP32 manda q, que gira vectores de los ejes del SENSOR a los ejes
+   del MUNDO (Z del mundo = arriba). Todo lo demás sale de ahí.
+   ===================================================================== */
+const Q = {
+  mul(a, b) {               // composición: primero b, luego a
+    const [aw, ax, ay, az] = a, [bw, bx, by, bz] = b;
+    return [aw*bw - ax*bx - ay*by - az*bz,
+            aw*bx + ax*bw + ay*bz - az*by,
+            aw*by - ax*bz + ay*bw + az*bx,
+            aw*bz + ax*by - ay*bx + az*bw];
+  },
+  conj(q) { return [q[0], -q[1], -q[2], -q[3]]; },   // giro inverso
+  eje(x, y, z, ang) {        // giro de 'ang' radianes alrededor del eje (x,y,z)
+    const s = Math.sin(ang / 2);
+    return [Math.cos(ang / 2), x*s, y*s, z*s];
+  },
+  normalizar(q) { const n = Math.hypot(q[0], q[1], q[2], q[3]) || 1; return q.map(v => v / n); },
+  matriz(q) {                // matriz de rotación 3×3 equivalente
+    const [w, x, y, z] = q;
+    return [[1 - 2*(y*y + z*z), 2*(x*y - w*z),     2*(x*z + w*y)],
+            [2*(x*y + w*z),     1 - 2*(x*x + z*z), 2*(y*z - w*x)],
+            [2*(x*z - w*y),     2*(y*z + w*x),     1 - 2*(x*x + y*y)]];
+  },
+  euler(q) {                 // ángulos Z-Y-X (yaw, pitch, roll) en grados
+    const [w, x, y, z] = q, g = 180 / Math.PI;
+    return {
+      roll:  Math.atan2(2*(w*x + y*z), 1 - 2*(x*x + y*y)) * g,
+      pitch: Math.asin(Math.max(-1, Math.min(1, 2*(w*y - z*x)))) * g,
+      yaw:   Math.atan2(2*(w*z + x*y), 1 - 2*(y*y + z*z)) * g,
+    };
+  },
+};
+const aplicar = (m, v) => [m[0][0]*v[0] + m[0][1]*v[1] + m[0][2]*v[2],
+                           m[1][0]*v[0] + m[1][1]*v[1] + m[1][2]*v[2],
+                           m[2][0]*v[0] + m[2][1]*v[1] + m[2][2]*v[2]];
+const punto = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+const GRAD = Math.PI / 180;
+
+// Montaje: giro fijo que lleva la punta del cohete (+Z del modelo) al eje
+// del sensor elegido. Ej. "+X": girar +90° alrededor de Y lleva Z a X.
+const S = Math.SQRT1_2;
+const MONTAJES = {
+  '+Z': [1, 0, 0, 0], '-Z': [0, 1, 0, 0],
+  '+X': [S, 0, S, 0], '-X': [S, 0, -S, 0],
+  '+Y': [S, -S, 0, 0], '-Y': [S, S, 0, 0],
+};
+
+// Formato numérico en castellano: coma decimal y signo menos de verdad
+function fmt(v, dec = 1, signo = false) {
+  if (v == null || !isFinite(v)) return '—';
+  const s = Math.abs(v).toFixed(dec).replace('.', ',');
+  const esCero = Number(Math.abs(v).toFixed(dec)) === 0;
+  return (v < 0 && !esCero ? '−' : (signo && !esCero ? '+' : '')) + s;
+}
+
+/* =====================================================================
+   2. ESTADO de la aplicación
+   ===================================================================== */
+const estado = {
+  q: [1, 0, 0, 0], g: [0, 0, 0], a: [0, 0, 1], T: null, hz: null, cp: -1, ac: 1,
+  cal: null,                          // último mensaje de calibración
+  yawCero: [1, 0, 0, 0],              // "tara" de yaw puesta con el botón
+  montaje: MONTAJES['+Z'],
+  ultimoDato: 0, mensajesSeg: 0, contadorMsg: 0,
+  baro: null,                         // último mensaje del barómetro
+  gps: null,                          // último mensaje del GPS
+};
+const historial = [];                 // muestras del giróscopo para su gráfica
+const historialAlt = [];              // muestras de altitud para su gráfica
+const VENTANA_S = 10;
+const traza = { origen: null, puntos: [] };   // recorrido GPS en metros desde el inicio
+
+/* =====================================================================
+   3. COLORES: se leen de las variables CSS (cambian con modo claro/oscuro)
+   ===================================================================== */
+let C = {};
+function leerColores() {
+  const cs = getComputedStyle(document.documentElement);
+  const hex = n => cs.getPropertyValue(n).trim();
+  const rgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  C = {
+    x: hex('--x'), y: hex('--y'), z: hex('--z'), ink: hex('--ink'), ink2: hex('--ink2'),
+    grid: hex('--grid'), axis: hex('--axis'), surface: hex('--surface'), page: hex('--page'),
+    sombra: hex('--sombra'), alt: hex('--alt'),
+    rgb: { cuerpo: rgb(hex('--cuerpo')), ojiva: rgb(hex('--ojiva')), aleta: rgb(hex('--aleta')), ref: rgb(hex('--ref')) },
+  };
+}
+leerColores();
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', leerColores);
+
+/* =====================================================================
+   4. EL COHETE: una malla de polígonos (en ejes del cohete, punta en +Z)
+   ===================================================================== */
+function construirCohete() {
+  const polys = [];
+  const N = 24, R = 0.13;
+  // Perfil [radio, altura, material]: se "tornea" girándolo 360°
+  const perfil = [
+    [0,     -1.00, 'ojiva'], [0.075, -1.00, 'ojiva'],   // tapa y tobera
+    [0.075, -0.90, 'aleta'],                             // base
+    [R,     -0.90, 'cuerpo'], [R, -0.55, 'cuerpo'], [R, -0.20, 'cuerpo'], [R, 0.15, 'cuerpo'],
+    [R,      0.50, 'ojiva'],                             // ojiva (curva)
+    [0.121,  0.66, 'ojiva'], [0.100, 0.81, 'ojiva'], [0.068, 0.95, 'ojiva'], [0.030, 1.06, 'ojiva'],
+    [0,      1.13, null],
+  ];
+  const P = (r, a, z) => [r * Math.cos(a), r * Math.sin(a), z];
+  for (let i = 0; i < perfil.length - 1; i++) {
+    const [r1, z1, mat] = perfil[i], [r2, z2] = perfil[i + 1];
+    for (let k = 0; k < N; k++) {
+      const a0 = 2 * Math.PI * k / N, a1 = 2 * Math.PI * (k + 1) / N;
+      let v = [P(r1, a0, z1), P(r1, a1, z1), P(r2, a1, z2), P(r2, a0, z2)];
+      if (r1 === 0) v = [v[0], v[2], v[3]];       // triángulo en la punta/tapa
+      else if (r2 === 0) v = [v[0], v[1], v[2]];
+      polys.push({ v, mat });
+    }
+  }
+  // 4 aletas trapezoidales; la de +X en color de referencia para ver el roll.
+  // Se parten en trocitos para que el orden de pintado no falle con el cuerpo.
+  const A = [R, -0.50], B = [0.40, -0.80], Cc = [0.40, -0.98], D = [R, -0.90];
+  const mezcla = (p, q, t) => [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+  for (let f = 0; f < 4; f++) {
+    const ang = f * Math.PI / 2, mat = f === 0 ? 'ref' : 'aleta';
+    const enPlano = ([r, z]) => P(r, ang, z);
+    const pt = (s, t) => enPlano(mezcla(mezcla(A, B, s), mezcla(D, Cc, s), t));
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 2; j++) {
+      const s0 = i / 3, s1 = (i + 1) / 3, t0 = j / 2, t1 = (j + 1) / 2;
+      polys.push({ v: [pt(s0, t0), pt(s1, t0), pt(s1, t1), pt(s0, t1)], mat });
+    }
+  }
+  // Normal de cada polígono (método de Newell: vale para cualquier polígono)
+  for (const p of polys) {
+    let nx = 0, ny = 0, nz = 0;
+    for (let i = 0; i < p.v.length; i++) {
+      const a = p.v[i], b = p.v[(i + 1) % p.v.length];
+      nx += (a[1] - b[1]) * (a[2] + b[2]);
+      ny += (a[2] - b[2]) * (a[0] + b[0]);
+      nz += (a[0] - b[0]) * (a[1] + b[1]);
+    }
+    const n = Math.hypot(nx, ny, nz) || 1;
+    p.n = [nx / n, ny / n, nz / n];
+  }
+  return polys;
+}
+const COHETE = construirCohete();
+
+/* =====================================================================
+   5. CÁMARA Y PROYECCIÓN
+   ---------------------------------------------------------------------
+   Cámara en órbita alrededor del origen (azimut, elevación, distancia).
+   Proyección en perspectiva: x_pantalla = x / profundidad (lo lejano se
+   ve más pequeño). Se pinta del polígono más lejano al más cercano
+   ("algoritmo del pintor"), sombreado con una luz principal desde arriba
+   a la izquierda + un relleno ambiente, como un key light + fill.
+   ===================================================================== */
+const CAM_INICIAL = { az: -0.85, el: 0.30, dist: 4.6 };
+const cam = { ...CAM_INICIAL };
+const SUELO_Z = -1.35;
+
+function baseCamara(w, h) {
+  const ce = Math.cos(cam.el), se = Math.sin(cam.el), ca = Math.cos(cam.az), sa = Math.sin(cam.az);
+  const pos = [cam.dist * ce * ca, cam.dist * ce * sa, cam.dist * se];
+  const f = [-ce * ca, -ce * sa, -se];          // hacia dónde mira
+  const r = [-sa, ca, 0];                       // derecha
+  const u = [-se * ca, -se * sa, ce];           // arriba de la cámara
+  const focal = Math.min(w, h) * 1.45;
+  const luz = (() => { const l = [0, 1, 2].map(i => -0.45 * r[i] + 0.75 * u[i] - 0.5 * f[i]);
+                       const n = Math.hypot(...l); return l.map(v => v / n); })();
+  const aCamara = p => { const d = [p[0] - pos[0], p[1] - pos[1], p[2] - pos[2]];
+                         return [punto(d, r), punto(d, u), punto(d, f)]; };
+  const aPantalla = c => [w / 2 + c[0] * focal / c[2], h / 2 - c[1] * focal / c[2]];
+  return { pos, f, r, u, focal, luz, aCamara, aPantalla };
+}
+
+// Línea 3D recortada contra el plano cercano (por si la cámara se acerca mucho)
+function linea3d(ctx, B, a, b) {
+  let ca = B.aCamara(a), cb = B.aCamara(b);
+  const cerca = 0.1;
+  if (ca[2] < cerca && cb[2] < cerca) return;
+  if (ca[2] < cerca || cb[2] < cerca) {
+    const t = (cerca - ca[2]) / (cb[2] - ca[2]);
+    const c = ca.map((v, i) => v + (cb[i] - v) * t);
+    if (ca[2] < cerca) ca = c; else cb = c;
+  }
+  const pa = B.aPantalla(ca), pb = B.aPantalla(cb);
+  ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]);
+}
+
+const lienzo = document.getElementById('vista3d');
+const ctx3d = lienzo.getContext('2d');
+
+function ajustarLienzo(cv, ctx) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return [w, h];
+}
+
+// Orientación que se dibuja = tara de yaw ⊗ orientación medida
+function qVista() { return Q.mul(estado.yawCero, estado.q); }
+
+function dibujarEscena() {
+  const [w, h] = ajustarLienzo(lienzo, ctx3d);
+  const ctx = ctx3d;
+  ctx.clearRect(0, 0, w, h);
+  const B = baseCamara(w, h);
+
+  // --- suelo (rejilla)
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = C.grid;
+  ctx.beginPath();
+  for (let i = -4; i <= 4; i++) {
+    const c = i * 0.5;
+    linea3d(ctx, B, [c, -2, SUELO_Z], [c, 2, SUELO_Z]);
+    linea3d(ctx, B, [-2, c, SUELO_Z], [2, c, SUELO_Z]);
+  }
+  ctx.stroke();
+
+  const qc = Q.mul(qVista(), estado.montaje);     // cohete -> mundo
+  const m = Q.matriz(qc);
+
+  // --- sombra: el eje del cohete aplastado contra el suelo
+  const cola = aplicar(m, [0, 0, -1.0]), punta = aplicar(m, [0, 0, 1.13]);
+  const sc = B.aCamara([cola[0], cola[1], SUELO_Z]), sp = B.aCamara([punta[0], punta[1], SUELO_Z]);
+  if (sc[2] > 0.1 && sp[2] > 0.1) {
+    const pa = B.aPantalla(sc), pb = B.aPantalla(sp);
+    ctx.save();
+    ctx.strokeStyle = C.sombra;
+    ctx.lineCap = 'round';
+    ctx.lineWidth = 0.24 * B.focal / ((sc[2] + sp[2]) / 2);
+    ctx.beginPath(); ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); ctx.stroke();
+    ctx.restore();
+  }
+
+  // --- vertical de referencia (discontinua)
+  ctx.save();
+  ctx.setLineDash([4, 5]);
+  ctx.strokeStyle = C.axis;
+  ctx.beginPath(); linea3d(ctx, B, [0, 0, SUELO_Z], [0, 0, 1.45]); ctx.stroke();
+  ctx.restore();
+
+  // --- cohete: transformar, ordenar por profundidad y pintar
+  const lista = [];
+  for (const p of COHETE) {
+    const vm = p.v.map(v => aplicar(m, v));
+    const vc = vm.map(B.aCamara);
+    if (vc.some(c => c[2] < 0.1)) continue;
+    const prof = vc.reduce((s, c) => s + c[2], 0) / vc.length;
+    // normal hacia la cámara (pintamos las dos caras de cada polígono)
+    let n = aplicar(m, p.n);
+    const centro = vm.reduce((s, v) => [s[0] + v[0], s[1] + v[1], s[2] + v[2]], [0, 0, 0]).map(x => x / vm.length);
+    const haciaCam = [B.pos[0] - centro[0], B.pos[1] - centro[1], B.pos[2] - centro[2]];
+    if (punto(n, haciaCam) < 0) n = n.map(x => -x);
+    const luz = 0.50 + 0.58 * Math.max(0, punto(n, B.luz));   // relleno + luz principal
+    const base = C.rgb[p.mat];
+    const col = `rgb(${base.map(c => Math.min(255, Math.round(c * luz))).join(',')})`;
+    lista.push({ pts: vc.map(B.aPantalla), prof, col });
+  }
+  lista.sort((a, b) => b.prof - a.prof);
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 0.7;          // el trazo del mismo color tapa las rendijas entre polígonos
+  for (const p of lista) {
+    ctx.beginPath();
+    ctx.moveTo(p.pts[0][0], p.pts[0][1]);
+    for (let i = 1; i < p.pts.length; i++) ctx.lineTo(p.pts[i][0], p.pts[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = p.col; ctx.strokeStyle = p.col;
+    ctx.fill(); ctx.stroke();
+  }
+  dibujarGizmo(B);
+}
+
+// Ejes X/Y/Z del SENSOR tal y como se ven desde la cámara
+const gizmo = document.getElementById('gizmo');
+const ctxG = gizmo.getContext('2d');
+function dibujarGizmo(B) {
+  const [w, h] = ajustarLienzo(gizmo, ctxG);
+  const ctx = ctxG, cx = w / 2, cy = h / 2, L = 34;
+  ctx.clearRect(0, 0, w, h);
+  ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(cx, cy, 44, 0, 2 * Math.PI); ctx.stroke();
+  const m = Q.matriz(qVista());
+  const ejes = [['X', [1, 0, 0], C.x], ['Y', [0, 1, 0], C.y], ['Z', [0, 0, 1], C.z]].map(([n, e, col]) => {
+    const d = aplicar(m, e);
+    return { n, col, sx: cx + L * punto(d, B.r), sy: cy - L * punto(d, B.u), prof: punto(d, B.f) };
+  });
+  ejes.sort((a, b) => b.prof - a.prof);              // el más lejano primero
+  ctx.font = '600 11px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (const e of ejes) {
+    ctx.strokeStyle = e.col; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(e.sx, e.sy); ctx.stroke();
+    ctx.fillStyle = e.col; ctx.beginPath(); ctx.arc(e.sx, e.sy, 4, 0, 2 * Math.PI); ctx.fill();
+    // etiqueta un poco más allá de la punta (mínimo 10 px, por si el eje apunta a la cámara)
+    const dx = e.sx - cx, dy = e.sy - cy, largo = Math.hypot(dx, dy);
+    const extra = largo < 1 ? 0 : 10 / largo;
+    const lx = e.sx + dx * extra, ly = e.sy + dy * extra;
+    ctx.fillStyle = C.ink; ctx.fillText(e.n, lx, ly);
+  }
+}
+
+// --- ratón / dedo: órbita y zoom
+const punteros = new Map();
+let distPellizco = 0;
+lienzo.addEventListener('pointerdown', e => { lienzo.setPointerCapture(e.pointerId); punteros.set(e.pointerId, [e.clientX, e.clientY]); });
+lienzo.addEventListener('pointermove', e => {
+  if (!punteros.has(e.pointerId)) return;
+  const [px, py] = punteros.get(e.pointerId);
+  punteros.set(e.pointerId, [e.clientX, e.clientY]);
+  if (punteros.size === 1) {
+    cam.az -= (e.clientX - px) * 0.008;
+    cam.el = Math.max(-1.2, Math.min(1.45, cam.el + (e.clientY - py) * 0.008));
+  } else if (punteros.size === 2) {
+    const [a, b] = [...punteros.values()];
+    const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    if (distPellizco) cam.dist = Math.max(2.6, Math.min(10, cam.dist * distPellizco / d));
+    distPellizco = d;
+  }
+});
+const soltar = e => { punteros.delete(e.pointerId); if (punteros.size < 2) distPellizco = 0; };
+lienzo.addEventListener('pointerup', soltar);
+lienzo.addEventListener('pointercancel', soltar);
+lienzo.addEventListener('wheel', e => { e.preventDefault(); cam.dist = Math.max(2.6, Math.min(10, cam.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+lienzo.addEventListener('dblclick', () => Object.assign(cam, CAM_INICIAL));
+
+/* =====================================================================
+   6. GRÁFICAS EN EL TIEMPO (giróscopo y altitud) y RECORRIDO GPS
+   ---------------------------------------------------------------------
+   Una sola "clase" dibuja las dos gráficas; cambia qué series pinta,
+   la ventana de tiempo y si el eje es simétrico alrededor de 0.
+   Al pasar el ratón la gráfica se congela y muestra los valores.
+   ===================================================================== */
+function rangoBonito(v) {
+  for (const r of [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000]) if (v <= r) return r;
+  return 2500;
+}
+function pasoBonito(v) {
+  for (const p of [0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 2.5, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000]) if (v <= p) return p;
+  return 2000;
+}
+
+class GraficaTiempo {
+  // op: { ventana (s), series: [{ nombre, color() }], valor(muestra, i), unidad,
+  //       simetrica (eje ±R), minRango, decimales }
+  constructor(idLienzo, idTip, op) {
+    this.cv = $(idLienzo); this.ctx = this.cv.getContext('2d'); this.tip = $(idTip); this.op = op;
+    this.raton = null; this.tCongelado = null;
+    this.cv.addEventListener('pointermove', e => {
+      this.raton = { x: e.clientX - this.cv.getBoundingClientRect().left };
+      if (this.tCongelado == null) this.tCongelado = performance.now() / 1000;
+    });
+    this.cv.addEventListener('pointerleave', () => { this.raton = null; this.tCongelado = null; });
+  }
+
+  dibujar(muestras) {
+    const op = this.op, ctx = this.ctx, V = op.ventana;
+    const [w, h] = ajustarLienzo(this.cv, ctx);
+    ctx.clearRect(0, 0, w, h);
+    const izq = 40, der = 6, arr = 6, abj = 18, ancho = w - izq - der, alto = h - arr - abj;
+    const tFin = this.tCongelado ?? performance.now() / 1000, tIni = tFin - V;
+    const visibles = muestras.filter(s => s.t >= tIni && s.t <= tFin);
+    const n = op.series.length;
+
+    // ---- escala vertical
+    let lo, hi, marcas, etiquetas, dec;
+    let mn = Infinity, mx = -Infinity;
+    for (const s of visibles) for (let i = 0; i < n; i++) { const v = op.valor(s, i); mn = Math.min(mn, v); mx = Math.max(mx, v); }
+    if (op.simetrica) {
+      const R = rangoBonito(Math.max(Math.abs(mn), Math.abs(mx), 0) * 1.1);
+      lo = -R; hi = R; marcas = [-R, -R / 2, 0, R / 2, R]; etiquetas = [-R, 0, R]; dec = R < 2 ? 1 : 0;
+    } else {
+      if (!isFinite(mn)) { mn = 0; mx = 0; }
+      const c = (mn + mx) / 2;
+      if (mx - mn < op.minRango) { mn = c - op.minRango / 2; mx = c + op.minRango / 2; }
+      const paso = pasoBonito((mx - mn) / 3);
+      lo = Math.floor(mn / paso) * paso; hi = Math.ceil(mx / paso) * paso;
+      marcas = []; for (let v = lo; v <= hi + paso / 2; v += paso) marcas.push(v);
+      etiquetas = marcas; dec = paso < 0.1 ? 2 : paso < 1 ? 1 : 0;
+    }
+    const X = t => izq + (t - tIni) / V * ancho;
+    const Y = v => arr + (1 - (v - lo) / (hi - lo)) * alto;
+
+    // ---- rejilla, línea de cero y marcas
+    ctx.font = '11px system-ui, sans-serif'; ctx.fillStyle = C.ink2;
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    for (const v of marcas) {
+      const esCero = Math.abs(v) < 1e-9;
+      ctx.strokeStyle = esCero ? C.axis : C.grid; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(izq, Math.round(Y(v)) + 0.5); ctx.lineTo(w - der, Math.round(Y(v)) + 0.5); ctx.stroke();
+      if (etiquetas.includes(v)) ctx.fillText(fmt(v, dec, true), izq - 6, Y(v));
+    }
+    ctx.textBaseline = 'top';
+    [[-V, `−${V} s`, 'left'], [-V / 2, `−${V / 2} s`, 'center'], [0, 'ahora', 'right']].forEach(([dt, txt, al]) => {
+      ctx.textAlign = al; ctx.fillText(txt, X(tFin + dt), h - abj + 4);
+    });
+
+    // ---- líneas
+    ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.save(); ctx.beginPath(); ctx.rect(izq, arr - 2, ancho, alto + 4); ctx.clip();
+    for (let i = 0; i < n; i++) {
+      ctx.strokeStyle = op.series[i].color();
+      ctx.beginPath();
+      visibles.forEach((s, k) => k ? ctx.lineTo(X(s.t), Y(op.valor(s, i))) : ctx.moveTo(X(s.t), Y(op.valor(s, i))));
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // ---- cruz de lectura + tooltip
+    if (this.raton && visibles.length) {
+      const t = tIni + (this.raton.x - izq) / ancho * V;
+      let mejor = visibles[0];
+      for (const s of visibles) if (Math.abs(s.t - t) < Math.abs(mejor.t - t)) mejor = s;
+      const x = X(mejor.t);
+      ctx.strokeStyle = C.axis; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(Math.round(x) + 0.5, arr); ctx.lineTo(Math.round(x) + 0.5, arr + alto); ctx.stroke();
+      for (let i = 0; i < n; i++) {
+        ctx.beginPath(); ctx.arc(x, Y(op.valor(mejor, i)), 4, 0, 2 * Math.PI);
+        ctx.fillStyle = op.series[i].color(); ctx.fill();
+        ctx.lineWidth = 2; ctx.strokeStyle = C.surface; ctx.stroke();
+      }
+      this.tip.innerHTML = `<div style="color:var(--ink2)">${fmt(mejor.t - tFin, 2)} s${op.nota ? op.nota() : ''}</div>` +
+        op.series.map((se, i) => `<div><span class="muestra" style="background:${se.color()}"></span> ${se.nombre} ${fmt(op.valor(mejor, i), op.decimales, true)} ${op.unidad}</div>`).join('');
+      this.tip.style.display = 'block';
+      this.tip.style.left = (x + 12 + this.tip.offsetWidth > w ? x - 12 - this.tip.offsetWidth : x + 12) + 'px';
+      this.tip.style.top = '4px';
+    } else {
+      this.tip.style.display = 'none';
+    }
+  }
+}
+
+const verCrudo = $('verCrudo');
+const graficaGiro = new GraficaTiempo('grafica', 'tip', {
+  ventana: VENTANA_S, simetrica: true, unidad: '°/s', decimales: 2,
+  series: [{ nombre: 'X', color: () => C.x }, { nombre: 'Y', color: () => C.y }, { nombre: 'Z', color: () => C.z }],
+  valor: (s, i) => verCrudo.checked ? s.crudo[i] : s.g[i],
+  nota: () => verCrudo.checked ? ' · crudo' : '',
+});
+const graficaAlt = new GraficaTiempo('graficaAlt', 'tipAlt', {
+  ventana: 60, simetrica: false, minRango: 1, unidad: 'm', decimales: 2,
+  series: [{ nombre: 'Altitud', color: () => C.alt }],
+  valor: s => s.h,
+});
+
+// ---- Recorrido GPS: latitud/longitud -> metros (este, norte) desde el inicio.
+// En distancias cortas la Tierra es "plana": 1° de latitud son ~111 km y
+// 1° de longitud son 111 km × cos(latitud).
+const RADIO_TIERRA = 6371000;
+function aMetros(lat, lon) {
+  const o = traza.origen;
+  return [(lon - o.lon) * GRAD * RADIO_TIERRA * Math.cos(o.lat * GRAD), (lat - o.lat) * GRAD * RADIO_TIERRA];
+}
+function anadirATraza(lat, lon) {
+  if (!traza.origen) traza.origen = { lat, lon };
+  const p = aMetros(lat, lon), u = traza.puntos[traza.puntos.length - 1];
+  if (!u || Math.hypot(p[0] - u[0], p[1] - u[1]) > 0.3) traza.puntos.push(p);   // ignorar el "baile" en parado
+  if (traza.puntos.length > 5000) traza.puntos.shift();
+}
+
+const lienzoTraza = $('traza');
+const ctxTraza = lienzoTraza.getContext('2d');
+function dibujarTraza() {
+  const [w, h] = ajustarLienzo(lienzoTraza, ctxTraza);
+  const ctx = ctxTraza;
+  ctx.clearRect(0, 0, w, h);
+  ctx.font = '11px system-ui, sans-serif';
+  if (!traza.puntos.length) {
+    ctx.fillStyle = C.ink2; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('Esperando posición…', w / 2, h / 2);
+    return;
+  }
+  let ext = 5;
+  for (const [x, y] of traza.puntos) ext = Math.max(ext, Math.abs(x), Math.abs(y));
+  ext *= 1.15;
+  const esc = (Math.min(w, h) / 2 - 14) / ext, cx = w / 2, cy = h / 2;
+  const P = ([x, y]) => [cx + x * esc, cy - y * esc];
+
+  // ejes por el punto de inicio
+  ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, Math.round(cy) + 0.5); ctx.lineTo(w, Math.round(cy) + 0.5);
+  ctx.moveTo(Math.round(cx) + 0.5, 0); ctx.lineTo(Math.round(cx) + 0.5, h); ctx.stroke();
+
+  // recorrido
+  ctx.strokeStyle = C.ink2; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.beginPath();
+  traza.puntos.forEach((p, i) => { const [sx, sy] = P(p); i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
+  ctx.stroke();
+
+  // inicio (hueco) y posición actual (lleno)
+  ctx.lineWidth = 2; ctx.strokeStyle = C.ink2; ctx.fillStyle = C.surface;
+  ctx.beginPath(); ctx.arc(cx, cy, 5, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+  const [ax, ay] = P(traza.puntos[traza.puntos.length - 1]);
+  ctx.beginPath(); ctx.arc(ax, ay, 5, 0, 2 * Math.PI);
+  ctx.fillStyle = C.ink; ctx.fill(); ctx.strokeStyle = C.surface; ctx.stroke();
+
+  // escala y norte
+  const L = pasoBonito(ext / 2), largo = L * esc;
+  ctx.strokeStyle = C.ink2; ctx.lineWidth = 1.5; ctx.lineCap = 'butt';
+  ctx.beginPath(); ctx.moveTo(10, h - 12); ctx.lineTo(10 + largo, h - 12);
+  ctx.moveTo(10, h - 16); ctx.lineTo(10, h - 8); ctx.moveTo(10 + largo, h - 16); ctx.lineTo(10 + largo, h - 8); ctx.stroke();
+  ctx.fillStyle = C.ink2; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+  ctx.fillText(`${fmt(L, L < 1 ? 1 : 0)} m`, 10, h - 18);
+  ctx.textAlign = 'right'; ctx.textBaseline = 'top'; ctx.fillText('N ↑', w - 8, 8);
+  ctx.textAlign = 'left'; ctx.fillText('inicio ○  ahora ●', 8, 8);
+}
+
+/* =====================================================================
+   7. PANEL: lecturas y calibración
+   ===================================================================== */
+const ICONOS = {
+  ok:       '<circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M4.6 8.2l2.2 2.2 4.6-4.8" stroke="#fff" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
+  midiendo: '<circle cx="8" cy="8" r="6.2" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M8 4.6V8l2.3 1.6" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/>',
+  fallo:    '<circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/>',
+  sin:      '<circle cx="8" cy="8" r="6.2" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M5 8h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+};
+const TEXTOS = { ok: 'Calibrado', midiendo: 'Midiendo…', fallo: 'Falló', sin: 'Sin calibrar' };
+
+function actualizarCalibracion() {
+  const c = estado.cal;
+  if (!c) return;
+  $('chipCal').dataset.e = c.estado;
+  $('iconoCal').innerHTML = ICONOS[c.estado] || ICONOS.sin;
+  $('textoCal').textContent = TEXTOS[c.estado] || c.estado;
+  $('mensajeCal').textContent = c.msg;
+  ['x', 'y', 'z'].forEach((e, i) => {
+    $('b' + e).textContent = c.tiene ? fmt(c.b[i], 3, true) + ' °/s' : '—';
+    $('s' + e).textContent = c.tiene || c.estado === 'fallo' ? fmt(c.s[i], 3) + ' °/s' : '—';
+  });
+  const midiendo = c.estado === 'midiendo';
+  $('btnCalibrar').disabled = midiendo;
+  $('barra').hidden = !midiendo;
+  if (!arrastrandoBeta && typeof c.beta === 'number') {
+    $('beta').value = c.beta; $('betaValor').textContent = fmt(c.beta, 3);
+  }
+}
+
+function ponerChip(base, e, texto) {
+  $('chip' + base).dataset.e = e;
+  $('icono' + base).innerHTML = ICONOS[e];
+  $('texto' + base).textContent = texto;
+}
+const calidadHdop = h => h < 0 ? '' : h < 1 ? 'excelente' : h < 2 ? 'buena' : h < 5 ? 'aceptable' : 'pobre';
+const coord = (v, pos, neg) => `${fmt(Math.abs(v), 6)}° ${v >= 0 ? pos : neg}`;
+
+function actualizarSensores() {
+  // ---- barómetro
+  const b = estado.baro;
+  if (b && b.chip === 'ninguno') {
+    ponerChip('Baro', 'fallo', 'No encontrado');
+    ['alt', 'vz', 'altMax', 'presion', 'tempBaro', 'humedad', 'altIsa', 'hudAlt', 'hudVz'].forEach(id => $(id).textContent = '—');
+  } else if (b) {
+    ponerChip('Baro', 'ok', b.chip);
+    $('alt').textContent = fmt(b.h, 2, true) + ' m';
+    $('vz').textContent = fmt(b.vz, 2, true) + ' m/s';
+    $('altMax').textContent = fmt(b.hmax, 2) + ' m';
+    $('presion').textContent = fmt(b.p, 2) + ' hPa';
+    $('tempBaro').textContent = fmt(b.T, 1) + ' °C';
+    $('humedad').textContent = b.hr < 0 ? 'no la mide (BMP280)' : fmt(b.hr, 0) + ' %';
+    $('altIsa').textContent = fmt(b.hisa, 0) + ' m';
+    $('hudAlt').textContent = fmt(b.h, 1, true) + ' m';
+    $('hudVz').textContent = fmt(b.vz, 1, true) + ' m/s';
+  }
+
+  // ---- GPS
+  const g = estado.gps;
+  if (!g) return;
+  if (g.mudo) ponerChip('Gps', 'fallo', 'Sin datos');
+  else if (!g.fix) ponerChip('Gps', 'midiendo', `Buscando · ${g.sat} sat`);
+  else ponerChip('Gps', 'ok', `Fix ${g.fix}D · ${g.sat} sat`);
+  $('hudGps').textContent = g.mudo ? 'sin datos' : g.fix ? `${g.fix}D · ${g.sat} sat` : `buscando · ${g.sat} sat`;
+  $('satelites').textContent = g.mudo ? '—' : `${g.sat} · ${g.hdop < 0 ? '—' : fmt(g.hdop, 1) + ' (' + calidadHdop(g.hdop) + ')'}`;
+  $('latitud').textContent = g.fix ? coord(g.lat, 'N', 'S') : '—';
+  $('longitud').textContent = g.fix ? coord(g.lon, 'E', 'O') : '—';
+  $('altGps').textContent = g.fix === 3 ? fmt(g.alt, 1) + ' m' : '—';
+  $('velocidad').textContent = g.fix ? `${fmt(g.vel, 1)} km/h · ${fmt(g.rumbo, 0)}°` : '—';
+  $('horaGps').textContent = g.hora || '—';
+  $('frases').textContent = `${g.ok} / ${g.mal}`;
+  const enlace = $('enlaceMapa');
+  enlace.hidden = !g.fix;
+  if (g.fix) enlace.href = `https://www.openstreetmap.org/?mlat=${g.lat.toFixed(6)}&mlon=${g.lon.toFixed(6)}#map=18/${g.lat.toFixed(6)}/${g.lon.toFixed(6)}`;
+}
+
+let ultimoPanel = 0;
+function actualizarLecturas(ahora) {
+  if (ahora - ultimoPanel < 100) return;       // 10 veces/s: legible, no un borrón
+  ultimoPanel = ahora;
+  const e = Q.euler(qVista());
+  $('roll').textContent = fmt(e.roll, 1, true) + '°';
+  $('pitch').textContent = fmt(e.pitch, 1, true) + '°';
+  $('yaw').textContent = fmt(e.yaw, 1, true) + '°';
+  $('cuaternion').textContent = estado.q.map(v => fmt(v, 3, true)).join('  ');
+  const modA = Math.hypot(...estado.a);
+  $('moduloA').textContent = fmt(modA, 3) + ' g';
+  $('temp').textContent = estado.T == null ? '—' : fmt(estado.T, 1) + ' °C';
+  $('frecuencias').textContent = estado.hz == null ? '—' : `IMU ${fmt(estado.hz, 0)} Hz · web ${estado.mensajesSeg}/s`;
+  ['gx', 'gy', 'gz'].forEach((id, i) => {
+    const v = verCrudo.checked && estado.cal ? estado.g[i] + estado.cal.b[i] : estado.g[i];
+    $(id).textContent = fmt(v, 2, true);
+  });
+
+  // Inclinación = ángulo entre el eje del cohete y la vertical del mundo
+  const eje = aplicar(Q.matriz(Q.mul(qVista(), estado.montaje)), [0, 0, 1]);
+  $('inclinacion').textContent = fmt(Math.acos(Math.max(-1, Math.min(1, eje[2]))) / GRAD, 1) + '°';
+
+  $('avisoGravedad').textContent = estado.ac ? '' : `gravedad ignorada · |a| = ${fmt(modA, 2)} g (solo giróscopo)`;
+
+  actualizarSensores();
+
+  // Progreso de calibración
+  if (estado.cp >= 0) $('barraRelleno').style.width = (estado.cp * 100).toFixed(1) + '%';
+
+  // Temperatura actual frente a la de la calibración
+  const c = estado.cal;
+  if (c && c.tiene && estado.T != null) {
+    const dT = estado.T - c.Tc;
+    $('tempCal').textContent = `Calibrado a ${fmt(c.Tc, 1)} °C · ahora ${fmt(estado.T, 1)} °C (Δ ${fmt(dT, 1, true)} °C)`;
+    $('alertaTemp').style.display = Math.abs(dT) > 5 ? 'block' : 'none';
+  } else {
+    $('tempCal').textContent = 'El sesgo del giróscopo cambia con la temperatura: calibra con la placa ya templada.';
+    $('alertaTemp').style.display = 'none';
+  }
+}
+
+/* =====================================================================
+   8. CONEXIÓN con la placa (WebSocket) o simulador en modo demo
+   ===================================================================== */
+let fuente = { enviar() {} };
+let modoDemo = false;
+
+function procesar(m) {
+  if (m.t === 'd') {
+    estado.q = m.q; estado.g = m.g; estado.a = m.a; estado.T = m.T;
+    estado.hz = m.hz; estado.cp = m.cp; estado.ac = m.ac;
+    estado.ultimoDato = performance.now(); estado.contadorMsg++;
+    const b = estado.cal ? estado.cal.b : [0, 0, 0];
+    historial.push({ t: performance.now() / 1000, g: m.g.slice(), crudo: m.g.map((v, i) => v + b[i]) });
+    const limite = performance.now() / 1000 - VENTANA_S - 30;   // margen para la gráfica congelada
+    while (historial.length && historial[0].t < limite) historial.shift();
+  } else if (m.t === 'c') {
+    estado.cal = m;
+    actualizarCalibracion();
+  } else if (m.t === 'b') {
+    estado.baro = m;
+    if (m.chip !== 'ninguno') {
+      historialAlt.push({ t: performance.now() / 1000, h: m.h });
+      while (historialAlt.length && historialAlt[0].t < performance.now() / 1000 - 90) historialAlt.shift();
+    }
+  } else if (m.t === 'g') {
+    estado.gps = m;
+    if (m.fix >= 2) anadirATraza(m.lat, m.lon);
+  }
+}
+
+function ponerConexion(e, texto) { $('conexion').dataset.e = e; $('conexionTexto').textContent = texto; }
+
+function conectar() {
+  const params = new URLSearchParams(location.search);
+  if (location.protocol === 'file:' || params.has('demo')) { iniciarDemo(); return; }
+  ponerConexion('espera', 'Conectando…');
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  fuente = { enviar: t => { if (ws.readyState === WebSocket.OPEN) ws.send(t); } };
+  ws.onopen = () => ponerConexion('ok', 'Conectado');
+  ws.onmessage = e => { try { procesar(JSON.parse(e.data)); } catch (err) { console.warn('Mensaje raro', e.data); } };
+  ws.onclose = () => { ponerConexion('espera', 'Reconectando…'); setTimeout(conectar, 1000); };
+  ws.onerror = () => ws.close();
+}
+
+// Cada segundo: mensajes recibidos y aviso si la placa deja de mandar datos
+setInterval(() => {
+  estado.mensajesSeg = estado.contadorMsg; estado.contadorMsg = 0;
+  if (!modoDemo && $('conexion').dataset.e === 'ok' && performance.now() - estado.ultimoDato > 1500)
+    $('conexionTexto').textContent = 'Conectado · sin datos';
+  else if (!modoDemo && $('conexion').dataset.e === 'ok')
+    $('conexionTexto').textContent = 'Conectado';
+}, 1000);
+
+/* --------------------------------------------------------------- DEMO
+   Simula la placa con el MISMO algoritmo que el firmware (Madgwick), un
+   giróscopo con sesgo y ruido, y un movimiento "de mano". Sin calibrar,
+   verás cómo el yaw se va desplazando solo: eso es el sesgo integrándose.
+   ------------------------------------------------------------------- */
+class MadgwickJS {
+  constructor() { this.q = [1, 0, 0, 0]; this.beta = 0.1; this.usandoGravedad = true; }
+  actualizar(gx, gy, gz, ax, ay, az, dt, tol) {
+    let [q0, q1, q2, q3] = this.q;
+    let d0 = 0.5 * (-q1 * gx - q2 * gy - q3 * gz), d1 = 0.5 * (q0 * gx + q2 * gz - q3 * gy);
+    let d2 = 0.5 * (q0 * gy - q1 * gz + q3 * gx),  d3 = 0.5 * (q0 * gz + q1 * gy - q2 * gx);
+    const mod = Math.hypot(ax, ay, az);
+    this.usandoGravedad = mod > 0 && Math.abs(mod - 1) < tol;
+    if (this.usandoGravedad && this.beta > 0) {
+      ax /= mod; ay /= mod; az /= mod;
+      const fx = 2 * (q1 * q3 - q0 * q2) - ax, fy = 2 * (q0 * q1 + q2 * q3) - ay, fz = 2 * (0.5 - q1 * q1 - q2 * q2) - az;
+      const s0 = -2 * q2 * fx + 2 * q1 * fy, s1 = 2 * q3 * fx + 2 * q0 * fy - 4 * q1 * fz;
+      const s2 = -2 * q0 * fx + 2 * q3 * fy - 4 * q2 * fz, s3 = 2 * q1 * fx + 2 * q2 * fy;
+      const n = Math.hypot(s0, s1, s2, s3);
+      if (n > 1e-9) { d0 -= this.beta * s0 / n; d1 -= this.beta * s1 / n; d2 -= this.beta * s2 / n; d3 -= this.beta * s3 / n; }
+    }
+    this.q = Q.normalizar([q0 + d0 * dt, q1 + d1 * dt, q2 + d2 * dt, q3 + d3 * dt]);
+  }
+  alinear(ax, ay, az) {
+    const r = Math.atan2(ay, az), p = Math.atan2(-ax, Math.hypot(ay, az));
+    const cr = Math.cos(r / 2), sr = Math.sin(r / 2), cp = Math.cos(p / 2), sp = Math.sin(p / 2);
+    this.q = [cr * cp, sr * cp, cr * sp, -sr * sp];
+  }
+}
+
+class Simulador {
+  constructor(alMensaje) {
+    this.cb = alMensaje;
+    this.sesgoReal = [1.32, -0.86, 0.47];   // el "defecto de fábrica" del sensor simulado (°/s)
+    this.sesgo = [0, 0, 0]; this.ruido = [0, 0, 0];
+    this.tiene = false; this.estadoCal = 'sin'; this.msg = 'Sin calibrar (demo)'; this.Tc = 0;
+    this.filtro = new MadgwickJS();
+    this.tMov = 0; this.t = 0; this.calN = -1;
+    this.qReal = this.orientacion(0);
+    this.filtro.alinear(...this.gravedad(this.qReal));
+    // Barómetro simulado: "suelo" a 1009,6 hPa; mismo filtro alfa-beta que el firmware
+    this.pSuelo = 100960; this.pCero = this.pSuelo;
+    this.h = 0; this.vz = 0; this.hmax = 0; this.nTic = 0;
+    // GPS simulado: un paseo en forma de ocho alrededor de un punto cualquiera
+    this.lat0 = 40.41530; this.lon0 = -3.68440; this.okNmea = 0;
+    setTimeout(() => this.emitirEstado(), 50);
+    setInterval(() => this.tic(), 20);
+  }
+  orientacion(t) {                          // movimiento suave, como con la placa en la mano
+    const roll = 0.42 * Math.sin(0.61 * t), pitch = 0.33 * Math.sin(0.43 * t + 1.1), yaw = 0.9 * Math.sin(0.17 * t);
+    return Q.mul(Q.eje(0, 0, 1, yaw), Q.mul(Q.eje(0, 1, 0, pitch), Q.eje(1, 0, 0, roll)));
+  }
+  gravedad(q) {                             // "arriba" visto desde el sensor = lo que mide el acelerómetro
+    const [w, x, y, z] = q;
+    return [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)];
+  }
+  gauss() { return Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random()); }
+  emitirEstado() {
+    this.cb({ t: 'c', estado: this.estadoCal, tiene: this.tiene ? 1 : 0, b: this.sesgo, s: this.ruido,
+              Tc: this.Tc, beta: this.filtro.beta, msg: this.msg });
+  }
+  temperatura() { return 30.8 + 2.5 * (1 - Math.exp(-this.t / 120)); }
+  tic() {
+    const dt = 0.005;
+    let g = [0, 0, 0], a = [0, 0, 1];
+    for (let paso = 0; paso < 4; paso++) {          // 4 pasos de 5 ms = 200 Hz
+      this.t += dt;
+      if (this.calN < 0) this.tMov += dt;             // calibrando: la placa está quieta
+      const qNueva = this.orientacion(this.tMov);
+      let d = Q.mul(Q.conj(this.qReal), qNueva);      // giro en ejes del sensor durante dt
+      if (d[0] < 0) d = d.map(v => -v);
+      this.qReal = qNueva;
+      const crudo = [1, 2, 3].map(i => 2 * d[i] / dt / GRAD + this.sesgoReal[i - 1] + 0.07 * this.gauss());
+      a = this.gravedad(qNueva).map(v => v + 0.004 * this.gauss());
+      g = crudo.map((v, i) => v - this.sesgo[i]);
+      if (this.calN >= 0) this.acumular(crudo, a);
+      this.filtro.actualizar(g[0] * GRAD, g[1] * GRAD, g[2] * GRAD, a[0], a[1], a[2], dt, 0.15);
+    }
+    const cp = this.calN >= 0 ? this.calN / 700 : -1;
+    this.cb({ t: 'd', q: this.filtro.q, g, a, T: this.temperatura(), hz: 200, cp, ac: this.filtro.usandoGravedad ? 1 : 0 });
+    this.nTic++;
+    this.ticBaro(0.02);
+    if (this.nTic % 5 === 0) this.cb({ t: 'b', chip: 'BME280', p: this.pMedida / 100, T: this.temperatura() - 6.5, hr: 46,
+                                       h: this.h, vz: this.vz, hmax: this.hmax, hisa: 44330 * (1 - Math.pow(this.pMedida / 101325, 0.190295)) });
+    if (this.nTic % 50 === 0) this.ticGps();
+  }
+  ticBaro(dt) {
+    const hReal = 0.9 * (1 - Math.cos(0.32 * this.t));             // subir y bajar la placa ~1,8 m
+    this.pMedida = this.pSuelo * Math.pow(1 - hReal / 44330, 5.255) + 0.6 * this.gauss();
+    const medida = 44330 * (1 - Math.pow(this.pMedida / this.pCero, 0.190295));
+    this.h += this.vz * dt;                                         // predecir
+    const r = medida - this.h;                                      // comparar
+    this.h += 0.25 * r; this.vz += (0.03 / dt) * r;                 // corregir
+    this.hmax = Math.max(this.hmax, this.h);
+  }
+  ticGps() {
+    const t = this.t, ahora = new Date();
+    const hora = ahora.toISOString().slice(11, 19);
+    if (t < 2) return;                                              // al arrancar el GPS aún no habla
+    this.okNmea += 6;
+    if (t < 8) {                                                    // buscando satélites
+      this.cb({ t: 'g', mudo: 0, fix: 0, sat: Math.floor((t - 2) / 1.5), hdop: -1, lat: 0, lon: 0, alt: 0, vel: 0, rumbo: 0, hora, ok: this.okNmea, mal: 0 });
+      return;
+    }
+    const s = t - 8, x = 18 * Math.sin(0.05 * s), y = 10 * Math.sin(0.1 * s);
+    const vx = 18 * 0.05 * Math.cos(0.05 * s), vy = 10 * 0.1 * Math.cos(0.1 * s);
+    const lat = this.lat0 + (y + 0.6 * this.gauss()) / RADIO_TIERRA / GRAD;
+    const lon = this.lon0 + (x + 0.6 * this.gauss()) / (RADIO_TIERRA * Math.cos(this.lat0 * GRAD)) / GRAD;
+    this.cb({ t: 'g', mudo: 0, fix: 3, sat: 9 + (Math.random() < 0.3 ? 1 : 0), hdop: 0.9 + 0.2 * Math.random(),
+              lat, lon, alt: 655 + 1.5 * this.gauss(), vel: Math.hypot(vx, vy) * 3.6,
+              rumbo: (Math.atan2(vx, vy) / GRAD + 360) % 360, hora, ok: this.okNmea, mal: 0 });
+  }
+  acumular(crudo, a) {
+    this.calN++;
+    if (this.calN <= 100) return;                    // asentamiento
+    crudo.forEach((v, i) => { this.suma[i] += v; this.suma2[i] += v * v; });
+    if (this.calN >= 700) {
+      const n = 600;
+      this.sesgo = this.suma.map(s => s / n);
+      this.ruido = this.suma2.map((s2, i) => Math.sqrt(Math.max(0, s2 / n - this.sesgo[i] ** 2)));
+      this.tiene = true; this.estadoCal = 'ok'; this.Tc = this.temperatura();
+      this.msg = `Calibrado a ${fmt(this.Tc, 1)} °C (demo)`;
+      this.calN = -1;
+      this.filtro.alinear(...a);
+      this.emitirEstado();
+    }
+  }
+  enviar(texto) {
+    if (texto === 'cal') {
+      this.calN = 0; this.suma = [0, 0, 0]; this.suma2 = [0, 0, 0];
+      this.estadoCal = 'midiendo'; this.msg = 'Midiendo... no muevas la placa'; this.emitirEstado();
+    } else if (texto === 'borrar') {
+      this.sesgo = [0, 0, 0]; this.ruido = [0, 0, 0]; this.tiene = false;
+      this.estadoCal = 'sin'; this.msg = 'Calibración borrada'; this.emitirEstado();
+    } else if (texto === 'realinear') {
+      this.filtro.alinear(...this.gravedad(this.qReal));
+    } else if (texto === 'cero') {
+      this.pCero *= Math.pow(1 - this.h / 44330, 5.255); this.h = 0; this.hmax = 0;
+    } else if (texto.startsWith('beta=')) {
+      this.filtro.beta = Math.max(0, Math.min(1, parseFloat(texto.slice(5)))); this.emitirEstado();
+    }
+  }
+}
+
+function iniciarDemo() {
+  modoDemo = true;
+  ponerConexion('demo', 'Modo demo');
+  $('avisoDemo').hidden = false;
+  const sim = new Simulador(procesar);
+  fuente = { enviar: t => sim.enviar(t) };
+}
+
+/* =====================================================================
+   9. BOTONES Y CONTROLES
+   ===================================================================== */
+$('btnCalibrar').onclick = () => fuente.enviar('cal');
+$('btnBorrar').onclick = () => { if (confirmarBorrado()) fuente.enviar('borrar'); };
+$('btnRealinear').onclick = () => fuente.enviar('realinear');
+$('btnVista').onclick = () => Object.assign(cam, CAM_INICIAL);
+$('btnCero').onclick = () => fuente.enviar('cero');
+$('btnTraza').onclick = () => { traza.origen = null; traza.puntos = []; };   // la próxima posición será el nuevo inicio
+$('btnYawCero').onclick = () => {
+  // Gira la vista alrededor de la vertical para que el yaw actual pase a ser 0
+  const yaw = Q.euler(estado.q).yaw * GRAD;
+  estado.yawCero = Q.eje(0, 0, 1, -yaw);
+};
+
+// Borrar pide confirmación con un segundo clic (sin ventanas emergentes)
+let borradoPendiente = 0;
+function confirmarBorrado() {
+  const b = $('btnBorrar');
+  if (Date.now() - borradoPendiente < 3000) { b.textContent = 'Borrar'; borradoPendiente = 0; return true; }
+  borradoPendiente = Date.now(); b.textContent = '¿Seguro? Pulsa otra vez';
+  setTimeout(() => { if (borradoPendiente && Date.now() - borradoPendiente >= 3000) { b.textContent = 'Borrar'; borradoPendiente = 0; } }, 3100);
+  return false;
+}
+
+let arrastrandoBeta = false, ultimoEnvioBeta = 0;
+const beta = $('beta');
+beta.addEventListener('pointerdown', () => arrastrandoBeta = true);
+beta.addEventListener('pointerup', () => arrastrandoBeta = false);
+beta.addEventListener('input', () => {
+  $('betaValor').textContent = fmt(+beta.value, 3);
+  if (Date.now() - ultimoEnvioBeta > 100) { fuente.enviar('beta=' + beta.value); ultimoEnvioBeta = Date.now(); }
+});
+beta.addEventListener('change', () => { arrastrandoBeta = false; fuente.enviar('beta=' + beta.value); });
+
+const selMontaje = $('montaje');
+try { const g = localStorage.getItem('ov-montaje'); if (g && MONTAJES[g]) selMontaje.value = g; } catch (e) {}
+estado.montaje = MONTAJES[selMontaje.value];
+selMontaje.addEventListener('change', () => {
+  estado.montaje = MONTAJES[selMontaje.value];
+  try { localStorage.setItem('ov-montaje', selMontaje.value); } catch (e) {}
+});
+verCrudo.addEventListener('change', () => { ultimoPanel = 0; });
+
+/* =====================================================================
+   10. BUCLE DE DIBUJO (lo marca el navegador, ~60 veces por segundo)
+   ===================================================================== */
+function fotograma(ahora) {
+  dibujarEscena();
+  graficaGiro.dibujar(historial);
+  graficaAlt.dibujar(historialAlt);
+  dibujarTraza();
+  actualizarLecturas(ahora);
+  requestAnimationFrame(fotograma);
+}
+conectar();
+requestAnimationFrame(fotograma);
+</script>
+</body>
+</html>
